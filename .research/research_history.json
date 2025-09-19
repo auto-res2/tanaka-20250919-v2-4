@@ -3,5 +3,19 @@
   "queries": [
     "LLM fine-tuning loss",
     "custom loss function LLM"
+  ],
+  "research_study_list": [
+    {
+      "title": "When Scaling Meets LLM Finetuning: The Effect of Data, Model and Finetuning Method"
+    },
+    {
+      "title": "Revisiting Zeroth-Order Optimization for Memory-Efficient LLM Fine-Tuning: A Benchmark"
+    },
+    {
+      "title": "Discovering Preference Optimization Algorithms with and for Large Language Models"
+    },
+    {
+      "title": "Language Generation with Strictly Proper Scoring Rules"
+    }
   ]
 }
