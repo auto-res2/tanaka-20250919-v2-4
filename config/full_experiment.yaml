@@ -1,0 +1,45 @@
+model:
+  name: "meta-llama/Llama-2-7b-chat-hf"
+  tokenizer_name: "meta-llama/Llama-2-7b-chat-hf"
+  torch_dtype: "bfloat16"
+
+data:
+  # This config focuses on the summarization task as a representative example
+  # The full experimental design involves multiple tasks (dialogue, qa).
+  task_name: "summarization"
+  dataset_name: "abisee/cnn_dailymail"
+  dataset_config: "3.0.0"
+  train_samples: 5000
+  val_samples: 500
+  max_input_length: 768
+  max_target_length: 128
+
+training:
+  epochs: 2
+  batch_size: 64 # Global batch size, requires gradient accumulation on smaller hardware
+  lr: 2.0e-5
+  lr_scheduler_type: "cosine"
+  warmup_steps: 100
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 1.0e-8
+  seed: 42
+
+peft:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "v_proj"
+
+aibl_loss:
+  gamma: 3.0
+  lambda_r: 0.01
+  layer_idx: 15 # A middle layer for Llama-7B which has 32 layers
+
+evaluation:
+  # Global metrics to be calculated after fine-tuning
+  tasks:
+    - "wikitext2_ece"
+    - "c4_ppl"

@@ -1,0 +1,42 @@
+model:
+  name: "NousResearch/Llama-2-7b-chat-hf"
+  tokenizer_name: "NousResearch/Llama-2-7b-chat-hf"
+  torch_dtype: "bfloat16"
+
+data:
+  task_name: "summarization"
+  dataset_name: "abisee/cnn_dailymail"
+  dataset_config: "3.0.0"
+  train_samples: 16
+  val_samples: 8
+  max_input_length: 256
+  max_target_length: 64
+
+training:
+  epochs: 1
+  batch_size: 2
+  lr: 2.0e-5
+  lr_scheduler_type: "cosine"
+  warmup_steps: 10
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 1.0e-8
+  seed: 42
+
+peft:
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "v_proj"
+
+aibl_loss:
+  gamma: 3.0
+  lambda_r: 0.01
+  layer_idx: 15 # A middle layer for Llama-7B
+
+evaluation:
+  tasks:
+    - "wikitext2_ece"
+    - "c4_ppl"
