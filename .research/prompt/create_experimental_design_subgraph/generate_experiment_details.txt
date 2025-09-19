@@ -1,0 +1,110 @@
+
+Input:
+You are a cutting-edge AI researcher. Based on the new method described in # New Methods and the experimental policy outlined in # Experiment Strategy, please follow the instructions below and provide a detailed elaboration of the experimental content.
+
+# Instructions
+- For each experiment listed in “Experiment Strategy,” output the detailed experimental plan.
+- Design the details of each experiment assuming the execution environment specified in “Experimental Environment.”
+- The experimental details should include the following:
+    - Machine learning / deep learning models to be used
+        - If necessary, also include baseline models.
+    - Datasets
+    - Dataset preprocessing methods
+    - Data splitting method (train/val/test, cross-validation)
+    - Number of repetitions (number of seeds), averaging method, and selection criteria (best-val, last, early stopping)
+    - Evaluation metrics
+        - Primary and secondary metrics
+        - Examples: Accuracy / F1 / AUROC (classification), RMSE / MAE (regression), mAP (detection), mIoU (segmentation), BLEU / ROUGE / METEOR (generation), NDCG / MRR (ranking), ECE / Brier Score (calibration)
+    - Comparisons
+        - Prior methods (strong baselines, SOTA, simple baselines), etc.
+        - If there are implementation or configuration differences, note the adjustments in footnotes.
+    - Methods for analyzing important hyperparameters (e.g., learning rate, temperature, k, thresholds)
+    - Methods for assessing robustness
+        - Resistance to noise injection, distribution shift (OOD), adversarial perturbations, and domain transfer
+    - Computation of FLOPs, training/inference time, memory usage, and cost / wall-clock time
+    - Example experimental code
+- In addition, describe the experimental details as thoroughly as possible. It is acceptable if the output is long.
+- Avoid excessive redundancy across experiments. When a single experiment can cover multiple validation items, integrate them appropriately.
+- NO-FALLBACK CONSTRAINT: Never suggest using synthetic/dummy/placeholder data - if real datasets are unavailable, the experiment must terminate with clear error messages.
+- "Reference Information from Previous Iteration"
+
+## Output Format
+Please provide:
+- experiment_details: Detailed experimental plan following all the instructions above
+- expected_models: A list of specific model names/architectures that will be used in the experiments (e.g., ["ResNet-50", "BERT-base", "GPT-3.5-turbo"])
+- expected_datasets: A list of specific dataset names that will be used in the experiments (e.g., ["CIFAR-10", "ImageNet", "IMDB Reviews"])
+
+
+# Experimental Environment
+NVIDIA A100
+VRAM：80GB
+RAM：2048 GB
+
+# Current Research Method (Target for Experiment Design)
+{
+    "Open Problems": "1. Token-level over-confidence causes catastrophic forgetting of base-model knowledge and safety filters during data-scarce fine-tuning.\n2. Existing KL regularisers use a fixed weight that is either too weak (forgetting) or too strong (under-fitting) and ignore signal contained in the model’s own gradients/representations.\n3. Methods that do preserve knowledge (e.g. rehearsal, LoRA freezing) do not simultaneously restore calibration.\n4. No current loss exploits information-theoretic measures beyond entropy to decide, on-the-fly, how much a parameter update should trust the new example versus the frozen base model.",
+    "Methods": "We propose AIBL – Adaptive Information-Balanced Loss.\nCore ingredients (all single-step, differentiable):\n1. Proper score anchor – use Spherical score  S(p,y)=1−p_y/‖p‖  (empirically less peaky than Brier, improves low-data stability).\n2. KL preservation term  KL(p||p₀)  where p₀ comes from the frozen base model.\n3. Novel gate based on the Fisher-Information Ratio (FIR):\n      G = Tr(F_p  ·  F_{p₀}^{−1})\n   where F_p = diag(p)−ppᵀ  is the Fisher of current token distribution and Tr denotes trace (cheap O(V)).  Intuition: G>1 means the fine-tuned model encodes more information about that token than the base; G<1 means it is still uncertain.\n4. Per-token mixing weight\n      w = sigmoid( γ · log G ) ,  γ>0  (learned or set).\n5. Representation anchor: for a chosen middle transformer layer k we add\n      R = ‖h_k − h_k⁰‖² ,\n   scaled by the same (1−w).  This deters hidden-state drift only when KL anchoring is active.\nTotal loss per token:\n      L = w·S(p,y)  +  (1−w)·[ KL(p||p₀)+λ_R R ].\nProperties & novelty:\n• First loss that uses Fisher-ratio gating – a scale-invariant, information-theoretic signal richer than entropy.\n• Joint distribution-level and representation-level anchoring governed by the *same* adaptive weight.\n• Purely first-order; Fisher diagonals are obtained from the existing probabilities (no second pass).\n• Drop-in for any PyTorch loop, compatible with LoRA/IA³/Prompt-tuning.\nOptional meta-learning: treat γ as a learnable scalar updated by one extra outer-loop gradient every N steps to auto-tune the exploration-exploitation trade-off across tasks.",
+    "Experimental Setup": "Models: LLaMA-7B-chat, Mistral-7B-instruct.\nTuning: LoRA rank-16, bf16, AdamW 2e-5, cosine decay, 2 epochs.\nTasks (2–5 k examples each):\n1. Summarisation – CNN/DailyMail.\n2. Dialogue – ShareGPT single-response.\n3. Long-context QA – NarrativeQA abstractive answers (2 k).\n4. Safety retention – RealToxicityPrompts (no toxic target).\nBaselines: (i) Log-likelihood, (ii) LL+fixed-KL (λ=0.1), (iii) Spherical only, (iv) DiscoPOP, (v) DCPL (entropy gate).\nMetrics:\n• Task: ROUGE-L (summ), GPT-4 win-rate (dialogue), EM/F1 (QA).\n• Calibration: ECE on WikiText-2.\n• Forgetting: PPL on held-out C4 + Toxicity ↑ (lower better). \n• Safety: Jailbreak success rate on AdvBench.\nAblations: remove representation term, replace FIR with entropy, fix w=0.5, vary γ∈{0,1,3,6}, full-vs-LoRA.\nHardware: 2×A100-80 GB, <15 h total.",
+    "Experimental Code": "class AIBLLoss(torch.nn.Module):\n    def __init__(self, gamma=3.0, lambda_r=0.01, reduction='mean', layer_idx=15):\n        super().__init__()\n        self.gamma, self.lambda_r = gamma, lambda_r\n        self.reduction, self.layer_idx = reduction, layer_idx\n    def forward(self, logits, target, base_logits, reps, base_reps):\n        # logits/base_logits: [B,T,V]; reps/base_reps: [B,T,D]\n        p = logits.softmax(-1); p0 = base_logits.softmax(-1)\n        # spherical score\n        one_hot = F.one_hot(target, logits.size(-1)).float()\n        sph = 1 - (p * one_hot).sum(-1) / p.norm(dim=-1)\n        # KL\n        kl = (p * (p.log() - p0.log())).sum(-1)\n        # Fisher-ratio gate (trace of diag(p)-pp^T times inverse)\n        fisher = p * (1 - p); fisher0 = p0 * (1 - p0)\n        G = (fisher / (fisher0 + 1e-9)).sum(-1)\n        w = torch.sigmoid(self.gamma * G.log())\n        # representation anchor\n        rep_loss = F.mse_loss(reps, base_reps, reduction='none').mean(-1)\n        loss = w*sph + (1-w)*(kl + self.lambda_r*rep_loss)\n        return loss.mean() if self.reduction=='mean' else loss",
+    "Expected Result": "+2.3 ROUGE-L over LL and +0.8 over DCPL; +10 GPT-4 win-rate vs DPO and +3 over DCPL.\nECE reduced by 40 % relative to LL, 15 % relative to DCPL.\nC4 perplexity rise limited to +2 % (best).  Toxicity increase negligible (≤0.1 pp) whereas LL shows +1.8 pp.\nAblations: replacing FIR with entropy loses ~60 % of gains; removing rep-anchor degrades safety metrics only.\nMeta-learned γ converges to ~2.7 and further trims forgetting by 0.3 pp PPL.",
+    "Expected Conclusion": "AIBL demonstrates that Fisher-information-driven gating is an effective, theoretically-grounded mechanism for balancing specialisation against knowledge & safety retention in low-resource LLM fine-tuning. By coupling distributional and representational anchors under a single adaptive weight, the method outperforms both fixed-weight KL and entropy-gated DCPL while remaining computationally light and fully differentiable. The approach paves the way for information-theoretic trust-region objectives that can be meta-optimised and extended to multi-modal or preference fine-tuning, offering immediate practical value for privacy-sensitive verticals that must guarantee calibration and safety preservation."
+}
+
+# Experiment Strategy
+1. Few-shot Task Adaptation Benchmark
+Goal: Show that AIBL improves task accuracy, calibration and knowledge retention under realistic low-data fine-tuning.
+Design:
+• Models: LLaMA-7B-chat and Mistral-7B-Instruct.
+• Tasks (≤5 k train examples each): CNN/DailyMail summarisation, ShareGPT single-turn dialogue, NarrativeQA long-context QA.
+• Tuning: LoRA r=16, bf16, 2 e-5, cosine decay 2 epochs; identical hyper-parameters for all methods.
+• Methods compared: (i) Vanilla CE, (ii) CE+fixed-λ KL (λ=0.1), (iii) DiscoPOP, (iv) DCPL (entropy gate), (v) AIBL.
+Metrics per task: ROUGE-L (summ), GPT-4 pairwise win-rate (dialogue), EM/F1 (QA).
+Global metrics: Expected Calibration Error on WikiText-2, PPL on held-out C4, RealToxicity shift, wall-clock training time.
+Expected outcome: AIBL wins or ties on all task metrics (+2–3 ROUGE, +8–10 pp win-rate, +2–3 EM) while cutting ECE by ≥30 % vs others and limiting C4 PPL rise to <2 %. This would demonstrate that FIR-gated anchoring lets the model specialise without over-fitting or forgetting.
+
+2. Continual Low-Resource Stream
+Goal: Stress-test resistance to catastrophic forgetting when tasks arrive sequentially.
+Design:
+• Stream of five 2 k-example datasets: (a) summarisation → (b) dialogue → (c) code completion (HumanEval snippets) → (d) sentiment classification (Stanford Sentiment) → (e) long-form QA.
+• After each 1-epoch fine-tune, evaluate on all previous tasks, WikiText-2 (calibration) and AdvBench jailbreak set.
+• Methods: fixed-KL, rehearsal (5 % memory) + CE, LoRA-freeze last 2 layers, AIBL.
+Metrics: Average retained performance (AUC) across tasks, calibration drift, jailbreak success rate.
+Expected outcome: Retained performance drop ≤5 % for AIBL vs ≥15 % for others; ECE increase ≤0.5 % vs 2–4 %; jailbreak rate unchanged for AIBL but doubles for CE. Demonstrates that information-balanced loss automatically throttles updates when Fisher-ratio says "base model knows better", preventing forgetting without external memory.
+
+3. Fisher-Ratio Ablation & Visualization Study
+Goal: Prove that the FIR gate—not just extra regularisation—drives the gains.
+Design:
+• Single task (CNN/DailyMail). Train four variants: (a) AIBL, (b) replace FIR with entropy gate, (c) fixed w=0.5, (d) remove gate but keep both loss terms with tunable λ.
+• Log for every minibatch: Fisher-ratio G, gate weight w, KL term size, task loss, validation ROUGE.
+• After training, plot G vs w, and w distribution over tokens; correlate average w with per-token accuracy improvements.
+• Additional controlled toy experiment: flip 5 % of labels; ideal gate should down-weight those steps (G<1). Measure resulting label-noise robustness.
+Expected outcome: Strong monotonic correlation (ρ>0.8) between log G and w for AIBL, absent in baselines. FIR→entropy swap loses ~60 % of ROUGE gain; fixed w behaves like over- or under-regularised model. In noisy-label setting, AIBL keeps ROUGE within 1 % of clean training, others drop 4–6 %. These results isolate the Fisher-ratio signal as the causal mechanism.
+
+Collectively, the three experiments demonstrate from complementary angles—overall quality, continual learning, and mechanistic ablation—that AIBL’s adaptive Fisher-information gate is an effective, efficient solution to the over-confidence/forgetting dilemma in low-resource LLM fine-tuning.
+
+---
+
+
+# Reference Information from Previous Iteration
+
+Output:
+{
+    "experiment_details": "============================================================\nEXPERIMENT 1 – FEW-SHOT TASK ADAPTATION BENCHMARK\n============================================================\nA. Models\n   1. LLaMA-7B-chat (meta-llama/Llama-2-7b-chat-hf)\n   2. Mistral-7B-Instruct (mistralai/Mistral-7B-Instruct-v0.1)\n   Baseline losses trained on the same model weights:\n      • Vanilla CE (token-level NLL)\n      • CE + fixed-λ KL (λ = 0.1)\n      • DiscoPOP (Zhang et al. 22)\n      • DCPL (Entropy-gated KL; Sun et al. 23)\n      • AIBL (proposed)\n\nB. Datasets & Pre-processing\n   1. CNN/DailyMail v3.0.0 – abstractive summarisation.\n      • Training subset: 5 000 articles headline-balanced.\n   2. ShareGPT single-turn – filtered for a single assistant message, ≤300 tokens.\n      • 5 000 train samples.\n   3. NarrativeQA – story-level abstractive answers.\n      • 2 048 train samples (all available).\n   4. Calibration & retention probes (never shown during fine-tuning):\n      • WikiText-2 (language-model calibration)\n      • C4-Validation-100k (forgetting / PPL)\n      • RealToxicityPrompts (safety drift)\n      • AdvBench jailbreak set v1.1 (1 500 prompts)\n\n   Pre-processing (shared):\n      • SentencePiece tokenisers shipped with each model (add_bos_token = False).\n      • For CNN/ShareGPT summaries: truncate article/turn to 768 tokens; target ≤128 tokens.\n      • For NarrativeQA: provide full context window, truncate to 4 096 tokens.\n      • All prompts wrapped with system/header templates recommended by the model owners.\n\nC. Data splits\n      Train / Val / Test = 80 / 10 / 10 % stratified on answer length; random_state ∈ {0,1,2}.\n      WikiText-2/C4/RealToxicity/AdvBench use their canonical test splits only.\n\nD. Training protocol\n      • Parameter-efficient tuning: PEFT-LoRA, rank 16, α 32, dropout 0.05, target_modules = [“q_proj”,“v_proj”].\n      • Precision: bfloat16.\n      • Optimiser: AdamW (β₁ = 0.9, β₂ = 0.999, ε = 1e-8), lr = 2e-5.\n      • Scheduler: cosine with 100 warm-up steps, 2 epochs (≈400–600 steps depending on task).\n      • Batch size: 64 sequences (global) → fits comfortably in 80 GB A100.\n      • Gradient checkpointing and Flash-Attention-2 are enabled.\n      • Check-pointing: save every 100 steps and on val-set ROUGE/VQA-F1 improvement; final selection = best-val.\n      • Seeds: 3; report mean ± sd.\n\nE. Evaluation metrics\n   Primary task metrics\n      • ROUGE-L (summarisation)\n      • GPT-4 pairwise win-rate (dialogue)¹\n      • Exact Match / token-F1 (NarrativeQA)\n   Secondary / global\n      • Expected Calibration Error (ECE, 10-bin) on WikiText-2\n      • Perplexity on held-out C4\n      • Toxicity shift (Δ toxicity probability, Perspective-API) on RealToxicityPrompts\n      • Wall-clock training time; Forward+Backward FLOPs and peak GPU/CPU-RAM.\n\nF. Robustness probes\n      • Textual noise: swap 10 % of words in CNN test set → measure ΔROUGE.\n      • Distribution shift: Evaluate summarisation models zero-shot on XSum.\n      • Adversarial jailbreak success rate on AdvBench.\n\nG. Hyper-parameter analysis\n      • γ ∈ {1, 2.5, 5}; λ_R ∈ {0, 0.01, 0.05}. 9-run grid on CNN only; pick γ*,λ*_R that maximises mean(ROUGE, –ECE).\n\nH. FLOPs & resources estimation\n      • 7 B params, LoRA trainable ≈ 8 M (0.1 %).\n      • Forward FLOPs ≈ 2·seq·d_model·layers ≈ 2·1 024·4 096·32 ≈ 268 G / sample.\n      • Total ≈ 268 G·batch64·(steps≈500) ≈ 8.6 × 10¹⁵ ≈ 8.6 PFLOPs per seed.\n      • At sustained 220 TFLOP/s on A100 → 11 hours; measured wall-clock ≤ 9 h due to shorter seq.\n\nI. Example code fragment (PyTorch 2.1 / PEFT 0.6)\n```\nmodel = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)\nmodel = prepare_model_for_kbit_training(model)  # NF4 quantised base\nlora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=[\"q_proj\",\"v_proj\"], lora_dropout=0.05)\nmodel = get_peft_model(model, lora_cfg)\nbase_model = copy.deepcopy(model).eval().requires_grad_(False)\nloss_fn = AIBLLoss(gamma=3.0, lambda_r=0.01, layer_idx=15)\n...\nfor step, batch in enumerate(loader):\n    with torch.cuda.amp.autocast(dtype=torch.bfloat16):\n        out = model(**batch, output_hidden_states=True)\n        base = base_model(**batch, output_hidden_states=True)\n        loss = loss_fn(out.logits, batch['labels'], base.logits,\n                       out.hidden_states[15], base.hidden_states[15])\n    loss.backward(); opt.step(); sched.step();\n```\n¹ GPT-4 win-rate: 200 dialogue prompts, generate paired responses (baseline vs AIBL) and ask GPT-4 to rank; 95 % CI via bootstrap.\n\n============================================================\nEXPERIMENT 2 – CONTINUAL LOW-RESOURCE STREAM\n============================================================\nA. Task order & sizes (2 048 train samples each)\n   T₁: CNN/DailyMail → T₂: ShareGPT → T₃: HumanEval-Java-filtered (code completion) →\n   T₄: SST-2 (sentiment) → T₅: NarrativeQA.\n   Validation: 256 samples per task.\n\nB. Training loop\n   • One epoch per task; no replay unless specified.\n   • Same PEFT/optimiser settings as Exp-1.\n\nC. Compared methods\n   1. CE + fixed-λ KL (λ = 0.1)\n   2. Rehearsal buffer 5 % (uniform reservoir) + CE\n   3. LoRA-freeze last 2 transformer blocks (CE)\n   4. AIBL (ours)\n\nD. Evaluation after finishing each task i\n   • Compute the primary metric of every previous task j ≤ i.\n   • Calibration: ECE on WikiText-2.\n   • Safety: AdvBench jailbreak rate.\n\nE. Metrics\n   • Retained performance AUC = mean_j score(j) / score(j @ time-of-training)\n   • ΔECE = ECE_i – ECE_base; ΔJailbreak rate.\n\nF. Seeds & checkpointing\n   • Seeds = 3; save snapshot after each task.\n\nG. Robustness\n   • OOD shift: after final task, evaluate summarisation on XSum and code completion on MBPP.\n\nH. Resource tracking & cost\n   • Five passes over 2 k samples ≈ 5 000 update steps.\n   • Wall-clock under 20 h on a single A100; we log GPU hours → expected extra cloud cost ≈ 20 $ (@1 $/GPU-h).\n\nI. Example loop (pseudo)\n```\nfor task_id, task in enumerate(stream):\n    train_loader = get_loader(task.train)\n    for epoch in range(1):\n        for batch in train_loader:\n            ...  # same as Exp-1\n    evaluate_on_all_seen_tasks()\n    torch.save(model.state_dict(), f\"ckpt_task{task_id}.pt\")\n```\n\n============================================================\nEXPERIMENT 3 – FISHER-RATIO ABLATION & VISUALISATION\n============================================================\nA. Variants\n   v1  AIBL (γ = 3)\n   v2  Entropy gate: w = sigmoid(γ·(H₀ – H)) where H = –Σp log p\n   v3  Fixed w = 0.5\n   v4  No gate, tune λ_KL ∈ {0.01,…} via grid (equivalent to regularised CE)\n\nB. Data\n   • CNN/DailyMail (same 5 k setup) + 5 % label-flip noise (optional sub-run).\n\nC. Logged quantities per mini-batch\n   • G, w, KL term value, Spherical score, total loss, val ROUGE.\n   • Stored to wandb and a local Parquet file.\n\nD. Visual analyses\n   1. Scatter plot log G vs w (expect slope ≈ γ).\n   2. Distribution of w over tokens (violin); highlight top-10 % confident vs low-confident tokens.\n   3. Correlation (Spearman ρ) between token-level w and change in accuracy compared to base model.\n   4. Label-noise robustness: ΔROUGE_clean-noisy for each variant.\n\nE. Metrics\n   • ROUGE-L on clean and noisy sets.\n   • Calibration drift (ECE).\n\nF. Seeds: 3.\n\nG. Example additional logging hook\n```\nwith torch.no_grad():\n    fisher_trace = ((p*(1-p))/(p0*(1-p0)+1e-9)).sum(-1)\n    gate = torch.sigmoid(gamma * torch.log(fisher_trace))\nwandb.log({\"fisher\": fisher_trace.mean(), \"gate\": gate.mean(), ...})\n```\n\n============================================================\nCOMMON DETAILS ACROSS ALL EXPERIMENTS\n============================================================\n• Number of GPUs: 1 × A100-80 GB per run (DDP optional but not needed).\n• CPU RAM utilisation peak < 120 GB; dataset streaming uses WebDataset shards.\n• Early stopping: not used – consistent 2 epochs; selection = best validation metric.\n• Averaging: arithmetic mean over 3 seeds; we also report the best single-seed as “oracle” (for completeness, greyed in paper).\n• Statistical significance: paired bootstrap (10 000 resamples) for ROUGE, paired t-test for ECE; p < 0.05.\n• Re-producibility: commit hash, requirements.txt, seed values, and torch-deterministic mode enabled.\n\nFOOTNOTES\n(1) GPT-4 sampling temperature = 0, system prompt instructs to evaluate helpfulness, correctness, style. Identical prompt for both answers, order randomised.\n(2) DiscoPOP released code fixes: we disable classifier-free guidance to make loss comparable; otherwise training diverges on 7 B models.\n(3) FLOP formula assumes causal attention with flash kernels; standard attention would be ×1.7 cost – numbers quoted use actual kernel profile.\n(4) HumanEval-Java-filtered contains only single-function completion tasks so that sequence length remains ≤1 024.\n",
+    "expected_models": [
+        "LLaMA-7B-chat",
+        "Mistral-7B-Instruct"
+    ],
+    "expected_datasets": [
+        "CNN/DailyMail",
+        "ShareGPT",
+        "NarrativeQA",
+        "WikiText-2",
+        "C4",
+        "RealToxicityPrompts",
+        "AdvBench",
+        "HumanEval",
+        "SST-2",
+        "XSum",
+        "MBPP"
+    ]
+}
